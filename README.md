@@ -7,11 +7,12 @@ Multi-agent system for ServiceNow production support:
 | AMS Orchestrator AI Agent | ✅ Built |
 | Incident Router AI Agent | ✅ Built (anti-hallucination: says "insufficient information" instead of guessing) |
 | Job Remediation AI Agent | ✅ Built - real AWS remediation via boto3, gated by SOP-driven guardrails |
+| Service Request Router + Report Generation Agent | ✅ Built - routes report requests, generates Excel, emails through SES |
 | Shared Vector Database (BGE-M3 + Qdrant) | ✅ Built - incidents + SOPs, continuously updated |
 | Human approval via email (routing + remediation) | ✅ Built - one-click Approve/Reject links |
 | Audit trail | ✅ Built (PostgreSQL) |
 
-Every agent is backed by an **Anthropic LLM model** via `common/llm_client.py` (each agent's model is independently configurable in `.env`).
+Agents are backed by a configurable LLM provider. Local development defaults to **Ollama `qwen3:4b`** through `common/ollama_client.py`; switch `LLM_PROVIDER` later to test Claude/Sonnet through the shared LLM interface without rewriting the agents.
 
 ## Architecture
 
@@ -19,7 +20,16 @@ Every agent is backed by an **Anthropic LLM model** via `common/llm_client.py` (
                  ServiceNow (incidents + sc_req_item)
                               │ REST
                               ▼
-                 AMS Orchestrator AI Agent  ──classify──> service request (out of scope)
+                 AMS Orchestrator AI Agent  ──classify──> service request
+                              │                         │
+                              │                         ▼
+                              │              Service Request Router
+                              │                         │ report request
+                              │                         ▼
+                              │              Report Generation Agent
+                              │              - LLM extracts structured fields
+                              │              - approved SQL runs against Postgres
+                              │              - Excel report is emailed via SES
                               │ incident
                               ▼
                  Incident Router AI Agent
@@ -70,7 +80,8 @@ ams_solution/
 ├── common/
 │   ├── models.py                    # Ticket, RoutingResult, RemediationRecommendation...
 │   ├── servicenow_client.py         # ServiceNow REST client (placeholders for creds)
-│   ├── llm_client.py                # Anthropic API wrapper (used by every agent)
+│   ├── llm_factory.py               # chooses Ollama locally or Anthropic later
+│   ├── ollama_client.py             # local Ollama wrapper
 │   ├── embeddings.py                # BGE-M3 embedder
 │   ├── vector_db.py                 # Qdrant wrapper (shared collection: incidents + SOPs)
 │   ├── sop_store.py                 # loads/matches SOPs, indexes them into Qdrant
@@ -79,7 +90,7 @@ ams_solution/
 │   ├── remediation_executor.py      # REAL AWS actions (ECS/RDS/EC2/Lambda/SFN/Glue)
 │   ├── approval_store.py            # PostgreSQL - pending human-approval tokens
 │   ├── audit_store.py               # PostgreSQL - remediation audit trail
-│   └── email_utils.py               # SMTP: routing + remediation approval emails
+│   └── email_utils.py               # SES: report emails; SMTP: approval emails
 ├── agents/
 │   ├── ams_orchestrator_agent.py    # AMS Orchestrator AI Agent
 │   ├── incident_router_agent.py     # Incident Router AI Agent
@@ -100,11 +111,13 @@ ams_solution/
    ```
 
 2. **Configure credentials** — copy `.env.example` to `.env` and fill in:
-   - `ANTHROPIC_API_KEY`
+   - `LLM_PROVIDER=ollama`, `OLLAMA_MODEL=qwen3:4b`, and Ollama running locally
    - `SERVICENOW_INSTANCE_URL`, `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` (bare instance root URL, real decoded password - see comments in `.env.example` for common pitfalls)
    - `QDRANT_URL` (run locally: `docker run -p 6333:6333 qdrant/qdrant`)
    - `POSTGRES_URL` (run locally: `docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ams_agentic postgres`) - backs the audit trail (`common/audit_store.py`) and human-approval tokens (`common/approval_store.py`), one shared database, two tables (`audit_trail`, `approvals`), created automatically on first connect
-   - SMTP settings (Gmail by default - needs an [App Password](https://myaccount.google.com/apppasswords))
+   - `REPORT_POSTGRES_URL`, `REPORT_CATALOG_PATH`, `REPORT_SQL_DIR`, and `REPORT_OUTPUT_DIR` for report generation
+   - `AWS_REGION` and `SES_SOURCE_EMAIL` for report emails through Amazon SES
+   - SMTP settings only if you use the existing human approval emails for routing/remediation
    - `APPROVAL_BASE_URL` (must be reachable from wherever you open the approval email)
    - **AWS credentials** — see "AWS Prerequisites" below before enabling real remediation
 

@@ -1,7 +1,8 @@
 """
 Shared data models passed between agents.
 """
-from typing import Dict, Optional, List
+from datetime import date
+from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 
 
@@ -60,6 +61,69 @@ class JobFailureAssessment(BaseModel):
     confidence: float
     rationale: str
     job_name: Optional[str] = None
+
+
+class ServiceRequestRoute(BaseModel):
+    """Output of the service-request routing step."""
+
+    ticket_number: str
+    request_type: str
+    confidence: float
+    rationale: str
+    insufficient_information: bool = False
+
+
+class ReportRequestDetails(BaseModel):
+    """Structured report request extracted from a service catalog ticket."""
+
+    ticket_number: str
+    report_name: Optional[str] = None
+    frequency: str = "adhoc"
+    date_range: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    filters: Dict[str, str] = Field(default_factory=dict)
+    output_format: str = "excel"
+    recipient: Optional[str] = None
+    rationale: str = ""
+    insufficient_information: bool = False
+
+
+class ReportFilterDefinition(BaseModel):
+    """Allowed input filter for one approved report."""
+
+    name: str
+    value_type: str = "string"
+    required: bool = False
+    allowed_values: Optional[List[str]] = None
+
+
+class ReportDefinition(BaseModel):
+    """One approved report entry from the local report catalog."""
+
+    report_name: str
+    title: str
+    database: str = "postgres"
+    sql_file: str
+    default_recipient: Optional[str] = None
+    allowed_filters: List[ReportFilterDefinition] = Field(default_factory=list)
+
+
+class ResolvedReportDateRange(BaseModel):
+    start_date: date
+    end_date: date
+    label: str
+
+
+class ReportExecutionResult(BaseModel):
+    ticket_number: str
+    report_name: str
+    status: str
+    record_count: int = 0
+    recipient: Optional[str] = None
+    message: str = ""
+    output_path: Optional[str] = None
+    email_sent: bool = False
 
 
 class SimilarJobFailure(BaseModel):

@@ -3,7 +3,7 @@ Centralized configuration for the AMS Agentic AI Solution.
 
 All values are loaded from environment variables (see .env.example).
 Nothing sensitive is hard-coded - ServiceNow credentials and the
-Anthropic API key must be supplied via environment variables or a
+LLM credentials must be supplied via environment variables or a
 .env file that you create locally (never commit real secrets).
 """
 import os
@@ -29,7 +29,40 @@ class AnthropicSettings:
     model_job_classifier: str = field(
         default_factory=lambda: os.getenv("ANTHROPIC_MODEL_JOB_CLASSIFIER", "claude-sonnet-4-5-20250929")
     )
+    model_service_request_router: str = field(
+        default_factory=lambda: os.getenv("ANTHROPIC_MODEL_SERVICE_REQUEST_ROUTER", "claude-sonnet-4-5-20250929")
+    )
+    model_report_request_parser: str = field(
+        default_factory=lambda: os.getenv("ANTHROPIC_MODEL_REPORT_REQUEST_PARSER", "claude-sonnet-4-5-20250929")
+    )
     max_tokens: int = field(default_factory=lambda: int(os.getenv("ANTHROPIC_MAX_TOKENS", "1024")))
+
+
+@dataclass
+class OllamaSettings:
+    base_url: str = field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+    model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "qwen3:4b"))
+    model_orchestrator: str = field(
+        default_factory=lambda: os.getenv("OLLAMA_MODEL_ORCHESTRATOR", os.getenv("OLLAMA_MODEL", "qwen3:4b"))
+    )
+    model_router: str = field(
+        default_factory=lambda: os.getenv("OLLAMA_MODEL_ROUTER", os.getenv("OLLAMA_MODEL", "qwen3:4b"))
+    )
+    model_job_classifier: str = field(
+        default_factory=lambda: os.getenv("OLLAMA_MODEL_JOB_CLASSIFIER", os.getenv("OLLAMA_MODEL", "qwen3:4b"))
+    )
+    model_service_request_router: str = field(
+        default_factory=lambda: os.getenv(
+            "OLLAMA_MODEL_SERVICE_REQUEST_ROUTER", os.getenv("OLLAMA_MODEL", "qwen3:4b")
+        )
+    )
+    model_report_request_parser: str = field(
+        default_factory=lambda: os.getenv(
+            "OLLAMA_MODEL_REPORT_REQUEST_PARSER", os.getenv("OLLAMA_MODEL", "qwen3:4b")
+        )
+    )
+    max_tokens: int = field(default_factory=lambda: int(os.getenv("OLLAMA_MAX_TOKENS", "512")))
+    timeout_seconds: int = field(default_factory=lambda: int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300")))
 
 
 @dataclass
@@ -75,6 +108,13 @@ class SmtpSettings:
     to_human_review: str = field(
         default_factory=lambda: os.getenv("SMTP_TO_HUMAN_REVIEW", "")  # the gmail address to notify
     )
+
+
+@dataclass
+class SesSettings:
+    region_name: str = field(default_factory=lambda: os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")))
+    source_email: str = field(default_factory=lambda: os.getenv("SES_SOURCE_EMAIL", ""))
+    configuration_set: str = field(default_factory=lambda: os.getenv("SES_CONFIGURATION_SET", ""))
 
 
 @dataclass
@@ -169,17 +209,34 @@ class PostgresSettings:
 
 
 @dataclass
+class ReportSettings:
+    catalog_path: str = field(default_factory=lambda: os.getenv("REPORT_CATALOG_PATH", "reporting/reports.json"))
+    sql_dir: str = field(default_factory=lambda: os.getenv("REPORT_SQL_DIR", "reporting/sql"))
+    output_dir: str = field(default_factory=lambda: os.getenv("REPORT_OUTPUT_DIR", "output"))
+    database_url: str = field(
+        default_factory=lambda: os.getenv(
+            "REPORT_POSTGRES_URL",
+            os.getenv("POSTGRES_URL", "postgresql://postgres:postgres@localhost:5432/ams_agentic"),
+        )
+    )
+
+
+@dataclass
 class Settings:
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "ollama"))
     anthropic: AnthropicSettings = field(default_factory=AnthropicSettings)
+    ollama: OllamaSettings = field(default_factory=OllamaSettings)
     servicenow: ServiceNowSettings = field(default_factory=ServiceNowSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
     embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
     smtp: SmtpSettings = field(default_factory=SmtpSettings)
+    ses: SesSettings = field(default_factory=SesSettings)
     approval: ApprovalSettings = field(default_factory=ApprovalSettings)
     remediation: RemediationSettings = field(default_factory=RemediationSettings)
     cloudwatch: CloudWatchSettings = field(default_factory=CloudWatchSettings)
     s3: S3Settings = field(default_factory=S3Settings)
     postgres: PostgresSettings = field(default_factory=PostgresSettings)
+    reports: ReportSettings = field(default_factory=ReportSettings)
 
     confidence_threshold: float = field(default_factory=lambda: float(os.getenv("CONFIDENCE_THRESHOLD", "0.65")))
     top_k_similar_incidents: int = field(default_factory=lambda: int(os.getenv("TOP_K_SIMILAR_INCIDENTS", "5")))

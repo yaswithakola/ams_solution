@@ -1,6 +1,9 @@
 """
-SMTP helpers used by the AMS Orchestrator to notify a human when the
+Email helpers for AMS notifications.
+
+SMTP is still used by the AMS Orchestrator to notify a human when the
 Incident Router AI Agent can't confidently route an incident on its own.
+Report attachments are sent through Amazon SES.
 
 Two distinct situations, two distinct emails:
   - Low confidence but a candidate group exists -> send_human_review_email()
@@ -17,8 +20,10 @@ and the App Password (not your normal Gmail password) in SMTP_PASSWORD.
 """
 import logging
 import smtplib
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Optional
 
 from config import SmtpSettings
@@ -60,6 +65,70 @@ def _send(settings: SmtpSettings, subject: str, text_body: str, html_body: str, 
     except Exception:
         logger.exception("Failed to send %s email", log_label)
         return False
+
+
+def send_report_email_ses(
+    settings,
+    recipient: str,
+    subject: str,
+    text_body: str,
+    attachment_path: str,
+    html_body: Optional[str] = None,
+) -> bool:
+    sender = settings.source_email
+    if not sender or not recipient:
+        logger.warning(
+            "SES not fully configured (source_email/recipient missing); skipping report email and logging instead:\n%s",
+            text_body,
+        )
+        return False
+
+    msg = _build_report_message(sender, recipient, subject, text_body, attachment_path, html_body)
+
+    try:
+        import boto3
+
+        client = boto3.client("ses", region_name=settings.region_name)
+        kwargs = {
+            "Source": sender,
+            "Destinations": [recipient],
+            "RawMessage": {"Data": msg.as_string()},
+        }
+        if settings.configuration_set:
+            kwargs["ConfigurationSetName"] = settings.configuration_set
+        client.send_raw_email(**kwargs)
+        logger.info("Sent report email through SES to %s with attachment %s", recipient, Path(attachment_path).name)
+        return True
+    except Exception:
+        logger.exception("Failed to send report email through SES")
+        return False
+
+
+def _build_report_message(
+    sender: str,
+    recipient: str,
+    subject: str,
+    text_body: str,
+    attachment_path: str,
+    html_body: Optional[str] = None,
+):
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = recipient
+
+    body = MIMEMultipart("alternative")
+    body.attach(MIMEText(text_body, "plain"))
+    if html_body:
+        body.attach(MIMEText(html_body, "html"))
+    msg.attach(body)
+
+    path = Path(attachment_path)
+    with path.open("rb") as handle:
+        attachment = MIMEApplication(handle.read(), _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    attachment.add_header("Content-Disposition", "attachment", filename=path.name)
+    msg.attach(attachment)
+    return msg
 
 
 def send_human_review_email(

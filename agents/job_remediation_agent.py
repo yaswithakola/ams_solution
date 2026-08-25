@@ -52,16 +52,18 @@ specific recommendation. This also fails the guardrails automatically
 safety net, not a single point of failure.
 """
 import logging
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 from common.cloudwatch_client import CloudWatchLogsClient
-from common.llm_client import AnthropicAgentClient
 from common.models import RemediationRecommendation, SimilarJobFailure, Ticket
 from common.remediation_executor import REQUIRED_PARAMS
 from common.s3_client import S3Client
 from common.sop_store import SOP, SOPStore
 from common.vector_db import VectorStore
-from config import AnthropicSettings
+
+if TYPE_CHECKING:
+    from common.llm_base import AgentLLMClient
+    from config import AnthropicSettings
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +190,8 @@ class JobRemediationAgent:
     def __init__(
         self,
         vector_store: VectorStore,
-        llm_client: AnthropicAgentClient,
-        anthropic_settings: AnthropicSettings,
+        llm_client: "AgentLLMClient",
+        anthropic_settings: "AnthropicSettings",
         sop_store: SOPStore,
         cloudwatch_client: Optional[CloudWatchLogsClient] = None,
         s3_client: Optional[S3Client] = None,

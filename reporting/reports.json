@@ -1,0 +1,44 @@
+{
+  "reports": [
+    {
+      "report_name": "claims_failure",
+      "title": "Claims Failure Report",
+      "database": "postgres",
+      "sql_file": "claims_failure.sql",
+      "default_recipient": "operations@example.com",
+      "allowed_filters": [
+        {"name": "state", "value_type": "string", "required": false}
+      ]
+    },
+    {
+      "report_name": "member_enrollment",
+      "title": "Member Enrollment Report",
+      "database": "postgres",
+      "sql_file": "member_enrollment.sql",
+      "default_recipient": "enrollment@example.com",
+      "allowed_filters": [
+        {"name": "state", "value_type": "string", "required": false}
+      ]
+    },
+    {
+      "report_name": "billing_summary",
+      "title": "Billing Summary Report",
+      "database": "postgres",
+      "sql_file": "billing_summary.sql",
+      "default_recipient": "billing@example.com",
+      "allowed_filters": [
+        {"name": "state", "value_type": "string", "required": false}
+      ]
+    },
+    {
+      "report_name": "batch_job_failure",
+      "title": "Batch Job Failure Report",
+      "database": "postgres",
+      "sql_file": "batch_job_failure.sql",
+      "default_recipient": "batch-ops@example.com",
+      "allowed_filters": [
+        {"name": "job_name", "value_type": "string", "required": false}
+      ]
+    }
+  ]
+}

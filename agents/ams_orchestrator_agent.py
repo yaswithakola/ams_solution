@@ -26,6 +26,7 @@ real values via environment variables).
 """
 import logging
 import time
+from typing import Optional, TYPE_CHECKING
 
 from common.approval_store import ApprovalStore
 from common.audit_store import AuditStore
@@ -35,7 +36,6 @@ from common.email_utils import (
     send_remediation_approval_email,
 )
 from common.guardrails import GuardrailsValidator
-from common.llm_client import AnthropicAgentClient
 from common.models import JobFailureAssessment, Ticket
 from common.remediation_executor import RemediationExecutor
 from common.servicenow_client import ServiceNowClient
@@ -45,6 +45,16 @@ from config import Settings
 
 from agents.incident_router_agent import IncidentRouterAgent
 from agents.job_remediation_agent import JobRemediationAgent
+from agents.report_generation_agent import ReportGenerationAgent
+from agents.service_request_router_agent import (
+    REQUEST_GLUE_JOB_CONTROL,
+    REQUEST_REPORT_GENERATION,
+    ServiceRequestRouterAgent,
+)
+
+if TYPE_CHECKING:
+    from common.llm_base import AgentLLMClient
+    from common.report_service import ReportService
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +77,17 @@ class AMSOrchestratorAgent:
         servicenow_client: ServiceNowClient,
         incident_router_agent: IncidentRouterAgent,
         job_remediation_agent: JobRemediationAgent,
-        llm_client: AnthropicAgentClient,
+        llm_client: "AgentLLMClient",
         approval_store: ApprovalStore,
         vector_store: VectorStore,
         sop_store: SOPStore,
         guardrails: GuardrailsValidator,
         remediation_executor: RemediationExecutor,
         audit_store: AuditStore,
+        service_request_router_agent: Optional[ServiceRequestRouterAgent] = None,
+        report_generation_agent: Optional[ReportGenerationAgent] = None,
+        report_service: Optional["ReportService"] = None,
+        llm_model_settings=None,
     ):
         self.settings = settings
         self.servicenow = servicenow_client
@@ -86,7 +100,10 @@ class AMSOrchestratorAgent:
         self.guardrails = guardrails
         self.remediation_executor = remediation_executor
         self.audit_store = audit_store
-        self.model = settings.anthropic.model_orchestrator
+        self.service_request_router = service_request_router_agent
+        self.report_generation = report_generation_agent
+        self.report_service = report_service
+        self.model = (llm_model_settings or settings.anthropic).model_orchestrator
 
     # ------------------------------------------------------------------
     # Ticket-type classification
@@ -230,6 +247,89 @@ class AMSOrchestratorAgent:
         )
 
     # ------------------------------------------------------------------
+    # Service-request pipeline
+    # ------------------------------------------------------------------
+    def handle_service_request(self, ticket: Ticket) -> None:
+        if self.service_request_router is None:
+            logger.info("Ticket %s is a service request, but no service-request router is configured.", ticket.number)
+            return
+
+        route = self.service_request_router.route(ticket)
+        logger.info(
+            "Ticket %s service request route=%s confidence=%.2f",
+            ticket.number,
+            route.request_type,
+            route.confidence,
+        )
+
+        if route.request_type == REQUEST_REPORT_GENERATION:
+            self.handle_report_generation_request(ticket)
+            return
+
+        if route.request_type == REQUEST_GLUE_JOB_CONTROL:
+            self._add_service_request_note(
+                ticket,
+                "[AMS AI] Service Request Router identified this as a Glue job control request. "
+                "Glue enable/disable automation is not wired yet, so the ticket still needs manual handling.",
+            )
+            return
+
+        self._add_service_request_note(
+            ticket,
+            "[AMS AI] Service Request Router could not match this request to a supported automation path. "
+            f"Reason: {route.rationale}",
+        )
+
+    def handle_report_generation_request(self, ticket: Ticket) -> None:
+        if self.report_generation is None:
+            logger.info("Ticket %s is a report request, but no report-generation agent is configured.", ticket.number)
+            return
+
+        details = self.report_generation.parse(ticket)
+        if details.insufficient_information:
+            self._add_service_request_note(
+                ticket,
+                "[AMS AI] Report Generation AI Agent could not extract enough information to run a report. "
+                f"Reason: {details.rationale or 'Missing report name or date range.'}",
+            )
+            return
+
+        if self.report_service is None:
+            filter_text = ", ".join(f"{key}={value}" for key, value in details.filters.items()) or "none"
+            self._add_service_request_note(
+                ticket,
+                "[AMS AI] Report Generation AI Agent parsed this request successfully. "
+                f"report={details.report_name}, frequency={details.frequency}, "
+                f"date_range={details.date_range}, filters={filter_text}, "
+                f"recipient={details.recipient or 'not specified'}. "
+                "Report execution is not configured in this environment.",
+            )
+            return
+
+        result = self.report_service.run(details)
+        if result.status == "FAILED":
+            self._add_service_request_note(
+                ticket,
+                "[AMS AI] Report generation failed before email delivery. "
+                f"Report: {result.report_name}. Reason: {result.message}",
+            )
+            return
+
+        self._add_service_request_note(
+            ticket,
+            "[AMS AI] Report request completed through the approved report catalog. "
+            f"report={result.report_name}, records={result.record_count}, "
+            f"recipient={result.recipient or 'not specified'}, output={result.output_path or 'not generated'}. "
+            f"{result.message}",
+        )
+
+    def _add_service_request_note(self, ticket: Ticket, note: str) -> None:
+        try:
+            self.servicenow.add_work_note(ticket.sys_id, note, table=ticket.table)
+        except Exception:
+            logger.exception("Failed to add service-request work note for %s", ticket.number)
+
+    # ------------------------------------------------------------------
     # Per-ticket pipeline
     # ------------------------------------------------------------------
     def process_ticket(self, ticket: Ticket) -> None:
@@ -237,7 +337,7 @@ class AMSOrchestratorAgent:
         logger.info("Ticket %s classified as %s", ticket.number, ticket_type)
 
         if ticket_type != "incident":
-            logger.info("Ticket %s is a service request - out of scope for this agent chain.", ticket.number)
+            self.handle_service_request(ticket)
             return
 
         # 1. Route the incident to get the suggested L2 assignment group

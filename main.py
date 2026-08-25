@@ -3,7 +3,7 @@ Entry point for the AMS Agentic AI Solution.
 
 Wires together:
     - ServiceNowClient      (common/servicenow_client.py)
-    - AnthropicAgentClient  (common/llm_client.py)     - backs every agent
+    - LLM client            (common/llm_factory.py)    - Ollama locally or Claude later
     - CloudWatchLogsClient  (common/cloudwatch_client.py) - log-based grounding
     - S3Client              (common/s3_client.py)      - S3-based grounding (e.g. SOP-EAM-MMSO-701)
     - VectorStore           (common/vector_db.py)      - BGE-M3 + Qdrant, shared
@@ -29,12 +29,18 @@ import logging
 from agents.ams_orchestrator_agent import AMSOrchestratorAgent
 from agents.incident_router_agent import IncidentRouterAgent
 from agents.job_remediation_agent import JobRemediationAgent
+from agents.report_generation_agent import ReportGenerationAgent
+from agents.service_request_router_agent import ServiceRequestRouterAgent
 from common.approval_store import ApprovalStore
 from common.audit_store import AuditStore
 from common.cloudwatch_client import CloudWatchLogsClient
 from common.guardrails import GuardrailsValidator
-from common.llm_client import AnthropicAgentClient
+from common.llm_factory import build_llm_client
 from common.remediation_executor import RemediationExecutor
+from common.report_catalog import ReportCatalog
+from common.report_database import PostgresReportClient
+from common.report_excel import ExcelReportGenerator
+from common.report_service import ReportService
 from common.s3_client import S3Client
 from common.servicenow_client import ServiceNowClient
 from common.sop_store import SOPStore
@@ -51,9 +57,10 @@ def build_orchestrator() -> AMSOrchestratorAgent:
     # --- ServiceNow: PLACEHOLDER credentials come from config/.env ------
     servicenow_client = ServiceNowClient(settings.servicenow)
 
-    # --- Anthropic LLM client, shared/instantiated once, each agent can
-    # reference its own configured model string via `settings.anthropic` --
-    llm_client = AnthropicAgentClient(settings.anthropic)
+    # --- LLM client, shared/instantiated once. Defaults to local Ollama;
+    # set LLM_PROVIDER=anthropic later to test Claude/Sonnet. -----------
+    llm_client, llm_model_settings = build_llm_client(settings)
+    logger.info("Using %s LLM provider", settings.llm_provider)
 
     # --- Shared vector database (BGE-M3 + Qdrant) -----------------------
     vector_store = VectorStore(settings.qdrant, settings.embedding)
@@ -92,17 +99,35 @@ def build_orchestrator() -> AMSOrchestratorAgent:
     incident_router_agent = IncidentRouterAgent(
         vector_store=vector_store,
         llm_client=llm_client,
-        anthropic_settings=settings.anthropic,
+        anthropic_settings=llm_model_settings,
         top_k=settings.top_k_similar_incidents,
     )
     job_remediation_agent = JobRemediationAgent(
         vector_store=vector_store,
         llm_client=llm_client,
-        anthropic_settings=settings.anthropic,
+        anthropic_settings=llm_model_settings,
         sop_store=sop_store,
         cloudwatch_client=cloudwatch_client,
         s3_client=s3_client,
         top_k=settings.top_k_similar_incidents,
+    )
+    service_request_router_agent = ServiceRequestRouterAgent(
+        llm_client=llm_client,
+        anthropic_settings=llm_model_settings,
+    )
+    report_generation_agent = ReportGenerationAgent(
+        llm_client=llm_client,
+        anthropic_settings=llm_model_settings,
+    )
+    report_catalog = ReportCatalog(
+        catalog_path=settings.reports.catalog_path,
+        sql_dir=settings.reports.sql_dir,
+    )
+    report_service = ReportService(
+        catalog=report_catalog,
+        database_client=PostgresReportClient(settings.reports.database_url),
+        excel_generator=ExcelReportGenerator(settings.reports.output_dir),
+        ses_settings=settings.ses,
     )
 
     orchestrator = AMSOrchestratorAgent(
@@ -117,6 +142,10 @@ def build_orchestrator() -> AMSOrchestratorAgent:
         guardrails=guardrails,
         remediation_executor=remediation_executor,
         audit_store=audit_store,
+        service_request_router_agent=service_request_router_agent,
+        report_generation_agent=report_generation_agent,
+        report_service=report_service,
+        llm_model_settings=llm_model_settings,
     )
     return orchestrator
 

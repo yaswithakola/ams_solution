@@ -14,11 +14,14 @@ Output: RoutingResult (assignment_group, confidence, rationale) which is
         so (insufficient_information=True) instead of guessing.
 """
 import logging
+from typing import TYPE_CHECKING
 
-from common.llm_client import AnthropicAgentClient
 from common.models import RoutingResult, Ticket
 from common.vector_db import VectorStore
-from config import AnthropicSettings
+
+if TYPE_CHECKING:
+    from common.llm_base import AgentLLMClient
+    from config import AnthropicSettings
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +59,8 @@ Anti-hallucination rules - follow these strictly:
 
 
 class IncidentRouterAgent:
-    def __init__(self, vector_store: VectorStore, llm_client: AnthropicAgentClient,
-                 anthropic_settings: AnthropicSettings, top_k: int = 5):
+    def __init__(self, vector_store: VectorStore, llm_client: "AgentLLMClient",
+                 anthropic_settings: "AnthropicSettings", top_k: int = 5):
         self.vector_store = vector_store
         self.llm_client = llm_client
         self.model = anthropic_settings.model_router
