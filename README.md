@@ -8,6 +8,7 @@ Multi-agent system for ServiceNow production support:
 | Incident Router AI Agent | ✅ Built (anti-hallucination: says "insufficient information" instead of guessing) |
 | Job Remediation AI Agent | ✅ Built - real AWS remediation via boto3, gated by SOP-driven guardrails |
 | Service Request Router + Report Generation Agent | ✅ Built - routes report requests, generates Excel, emails through SES |
+| Restart Agent | ✅ Built - routes approved Glue restart/enable/disable requests from ServiceNow catalog tasks |
 | Shared Vector Database (BGE-M3 + Qdrant) | ✅ Built - incidents + SOPs, continuously updated |
 | Human approval via email (routing + remediation) | ✅ Built - one-click Approve/Reject links |
 | Audit trail | ✅ Built (PostgreSQL) |
@@ -17,19 +18,22 @@ Agents are backed by a configurable LLM provider. Local development defaults to 
 ## Architecture
 
 ```
-                 ServiceNow (incidents + sc_req_item)
+                 ServiceNow (incidents + sc_task under RITM)
                               │ REST
                               ▼
                  AMS Orchestrator AI Agent  ──classify──> service request
                               │                         │
                               │                         ▼
                               │              Service Request Router
-                              │                         │ report request
-                              │                         ▼
-                              │              Report Generation Agent
-                              │              - LLM extracts structured fields
-                              │              - approved SQL runs against Postgres
-                              │              - Excel report is emailed via SES
+                              │              - polls catalog tasks (sc_task)
+                              │              - reads parent RITM context
+                              │                         │
+                              │           ┌─────────────┴─────────────┐
+                              │           ▼                           ▼
+                              │   Report Generation Agent        Restart Agent
+                              │   - extracts report fields       - extracts service/action/job
+                              │   - runs approved SQL            - validates approved job catalog
+                              │   - emails Excel via SES         - runs Glue job/trigger action
                               │ incident
                               ▼
                  Incident Router AI Agent
@@ -73,6 +77,8 @@ ams_solution/
 ├── approval_server.py               # Flask server handling Approve/Reject email links
 ├── requirements.txt
 ├── .env.example                     # copy to .env and fill in credentials
+├── infra/iam/
+│   └── ams-agent-runtime-policy.json # IAM policy template for whoever runs the app
 ├── sop_documents/                   # real SOP library (ECS/RDS/EC2/Lambda/Glue/SFN)
 │   ├── SOP-*.json                   # structured metadata (resolution_steps, risk, etc.)
 │   ├── SOP-*.txt                    # rich narrative version, indexed for RAG
@@ -88,13 +94,19 @@ ams_solution/
 │   ├── guardrails.py                # safety gate before any auto-remediation
 │   ├── aws_client.py                # boto3 session/client factory
 │   ├── remediation_executor.py      # REAL AWS actions (ECS/RDS/EC2/Lambda/SFN/Glue)
+│   ├── restart_catalog.py           # approved job catalog for Restart Agent
+│   ├── restart_service.py           # deterministic Glue restart/enable/disable executor
 │   ├── approval_store.py            # PostgreSQL - pending human-approval tokens
 │   ├── audit_store.py               # PostgreSQL - remediation audit trail
 │   └── email_utils.py               # SES: report emails; SMTP: approval emails
 ├── agents/
 │   ├── ams_orchestrator_agent.py    # AMS Orchestrator AI Agent
 │   ├── incident_router_agent.py     # Incident Router AI Agent
+│   ├── report_generation_agent.py   # Service-request report parser
+│   ├── restart_agent.py             # Service-request restart parser
 │   └── job_remediation_agent.py     # Job Remediation AI Agent
+├── restart/
+│   └── jobs.json                    # allowlist of jobs/actions Restart Agent can execute
 ├── ingestion/
 │   ├── ingest_incidents.py          # one-time historical incident load into Qdrant
 │   ├── ingest_sops.py               # one-time SOP load into Qdrant
@@ -116,7 +128,9 @@ ams_solution/
    - `QDRANT_URL` (run locally: `docker run -p 6333:6333 qdrant/qdrant`)
    - `POSTGRES_URL` (run locally: `docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ams_agentic postgres`) - backs the audit trail (`common/audit_store.py`) and human-approval tokens (`common/approval_store.py`), one shared database, two tables (`audit_trail`, `approvals`), created automatically on first connect
    - `REPORT_POSTGRES_URL`, `REPORT_CATALOG_PATH`, `REPORT_SQL_DIR`, and `REPORT_OUTPUT_DIR` for report generation
+   - `RESTART_JOB_CATALOG_PATH` for the Restart Agent's approved job/action allowlist
    - `AWS_REGION` and `SES_SOURCE_EMAIL` for report emails through Amazon SES
+   - `SERVICE_REQUEST_TASK_QUERY_FILTER` for catalog-task polling, for example `active=true^assignment_group=<your automation group sys_id>`
    - SMTP settings only if you use the existing human approval emails for routing/remediation
    - `APPROVAL_BASE_URL` (must be reachable from wherever you open the approval email)
    - **AWS credentials** — see "AWS Prerequisites" below before enabling real remediation
@@ -153,13 +167,40 @@ Set `AWS_REGION` to match where your resources live.
 
 ### 2. IAM permissions
 
-Attach a policy with (at minimum) the actions this project's remediation executor actually calls:
+Attach `infra/iam/ams-agent-runtime-policy.json` to the IAM identity that runs this repo:
+
+- Local PowerShell run: attach it to the IAM user/role shown by `aws sts get-caller-identity`.
+- Lambda/ECS/EC2 run: attach it to the execution role used by that service.
+
+The checked-in template includes SES report email, Restart Agent Glue actions, existing remediation actions, CloudWatch evidence lookup, and S3 remediation file movement. It currently uses `"Resource": "*"` so local testing is simple. For production, scope resources down to the specific SES identity, Glue jobs/triggers, log groups, buckets, and AWS resources this agent is allowed to touch.
+
+Current policy template:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "SendReportEmailsWithSes",
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RunApprovedRestartAgentGlueActions",
+      "Effect": "Allow",
+      "Action": [
+        "glue:StartJobRun",
+        "glue:StartTrigger",
+        "glue:StopTrigger"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RunApprovedIncidentRemediationActions",
       "Effect": "Allow",
       "Action": [
         "ecs:UpdateService",
@@ -177,16 +218,29 @@ Attach a policy with (at minimum) the actions this project's remediation executo
         "lambda:UpdateFunctionConfiguration",
         "states:StartExecution",
         "states:DescribeExecution",
-        "glue:StartJobRun",
         "glue:GetJobRun",
         "glue:GetJob",
-        "glue:GetJobRuns",
+        "glue:GetJobRuns"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadOperationalEvidence",
+      "Effect": "Allow",
+      "Action": [
         "logs:DescribeLogGroups",
         "logs:DescribeLogStreams",
         "logs:FilterLogEvents",
         "logs:GetLogEvents",
         "s3:ListBucket",
-        "s3:GetObject",
+        "s3:GetObject"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MoveApprovedS3RemediationFiles",
+      "Effect": "Allow",
+      "Action": [
         "s3:CopyObject",
         "s3:DeleteObject"
       ],
@@ -195,7 +249,6 @@ Attach a policy with (at minimum) the actions this project's remediation executo
   ]
 }
 ```
-Scope `Resource` down to specific ARNs for production use - `*` is shown here for simplicity during setup/testing.
 
 ### 3. Pre-existing AWS resources ("set up the job")
 
@@ -225,7 +278,13 @@ This project reimplements the reference architecture's **Lambda/Step-Functions/T
 ## How each agent works
 
 ### AMS Orchestrator AI Agent (`agents/ams_orchestrator_agent.py`)
-Classifies incident vs. service request, calls the Incident Router, applies the confidence gate (approve-link email below threshold, plain email if the router reports insufficient information, else auto-assign + feed the vector DB), then asks the LLM whether this is a job/AWS failure and hands off to the Job Remediation AI Agent.
+Classifies incident vs. service request. Incidents go through the Incident Router, confidence gate, L2 assignment, and job-remediation check. Service requests are fulfilled from catalog tasks (`sc_task`): the task is polled, the parent RITM is read as the main request context, and the Service Request Router decides whether it is report generation, restart, or unsupported. Report-generation requests are parsed, executed through the approved report catalog, emailed through SES, and updated as ServiceNow task comments. Restart requests are parsed by the Restart Agent and executed only if the requested Glue job/action is listed in `restart/jobs.json`. For now, both the catalog task and parent RITM are intentionally left open after processing.
+
+### Restart Agent (`agents/restart_agent.py`)
+Handles service catalog requests such as "restart daily_member_load", "disable the daily member load Glue job", or "enable claims failure reprocess". The LLM only extracts `service`, `action`, and `job_name`; it does not call AWS. `common/restart_service.py` validates the extracted job against `restart/jobs.json`, then calls boto3 for the approved action:
+- `restart` -> `glue.start_job_run`
+- `enable` -> `glue.start_trigger`
+- `disable` -> `glue.stop_trigger`
 
 ### Incident Router AI Agent (`agents/incident_router_agent.py`)
 Embeds the incident, searches Qdrant (`source=incident`) for similar historical incidents, and asks the LLM for an L2 group + confidence - explicitly instructed to say "I do not have enough information" rather than guess when the evidence is too thin.

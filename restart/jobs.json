@@ -1,0 +1,29 @@
+{
+  "jobs": [
+    {
+      "job_name": "daily_member_load",
+      "service": "glue",
+      "trigger_name": "daily_member_load_schedule",
+      "allowed_actions": ["restart", "enable", "disable"],
+      "aliases": ["daily member load", "member load"],
+      "description": "Sample Glue job used for member load service requests."
+    },
+    {
+      "job_name": "claims_failure_reprocess",
+      "service": "glue",
+      "trigger_name": "claims_failure_reprocess_schedule",
+      "allowed_actions": ["restart", "enable", "disable"],
+      "aliases": ["claims failure reprocess", "claims reprocess"],
+      "description": "Sample Glue job used to reprocess failed claims."
+    },
+    {
+      "job_name": "usmg-dev-fulfillment-pso-fallout",
+      "service": "glue",
+      "trigger_name": "usmg-dev-fulfillment-pso-fallout-trigger",
+      "allowed_actions": ["restart", "enable", "disable"],
+      "aliases": ["pso fallout", "fulfillment pso fallout"],
+      "description": "Glue job for Restart Agent test."
+    }
+	
+  ]
+}

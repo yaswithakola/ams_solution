@@ -35,6 +35,9 @@ class AnthropicSettings:
     model_report_request_parser: str = field(
         default_factory=lambda: os.getenv("ANTHROPIC_MODEL_REPORT_REQUEST_PARSER", "claude-sonnet-4-5-20250929")
     )
+    model_restart_request_parser: str = field(
+        default_factory=lambda: os.getenv("ANTHROPIC_MODEL_RESTART_REQUEST_PARSER", "claude-sonnet-4-5-20250929")
+    )
     max_tokens: int = field(default_factory=lambda: int(os.getenv("ANTHROPIC_MAX_TOKENS", "1024")))
 
 
@@ -61,6 +64,11 @@ class OllamaSettings:
             "OLLAMA_MODEL_REPORT_REQUEST_PARSER", os.getenv("OLLAMA_MODEL", "qwen3:4b")
         )
     )
+    model_restart_request_parser: str = field(
+        default_factory=lambda: os.getenv(
+            "OLLAMA_MODEL_RESTART_REQUEST_PARSER", os.getenv("OLLAMA_MODEL", "qwen3:4b")
+        )
+    )
     max_tokens: int = field(default_factory=lambda: int(os.getenv("OLLAMA_MAX_TOKENS", "512")))
     timeout_seconds: int = field(default_factory=lambda: int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300")))
 
@@ -77,6 +85,15 @@ class ServiceNowSettings:
         default_factory=lambda: os.getenv(
             "INCIDENT_QUERY_FILTER", "active=true^assignment_group=^ORassignment_groupISEMPTY"
         )
+    )
+    service_request_query_filter: str = field(
+        default_factory=lambda: os.getenv("SERVICE_REQUEST_QUERY_FILTER", "active=true")
+    )
+    service_request_task_query_filter: str = field(
+        default_factory=lambda: os.getenv("SERVICE_REQUEST_TASK_QUERY_FILTER", "active=true")
+    )
+    service_request_task_closed_state: str = field(
+        default_factory=lambda: os.getenv("SERVICE_REQUEST_TASK_CLOSED_STATE", "3")
     )
 
 
@@ -222,6 +239,11 @@ class ReportSettings:
 
 
 @dataclass
+class RestartSettings:
+    catalog_path: str = field(default_factory=lambda: os.getenv("RESTART_JOB_CATALOG_PATH", "restart/jobs.json"))
+
+
+@dataclass
 class Settings:
     llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "ollama"))
     anthropic: AnthropicSettings = field(default_factory=AnthropicSettings)
@@ -237,6 +259,7 @@ class Settings:
     s3: S3Settings = field(default_factory=S3Settings)
     postgres: PostgresSettings = field(default_factory=PostgresSettings)
     reports: ReportSettings = field(default_factory=ReportSettings)
+    restart: RestartSettings = field(default_factory=RestartSettings)
 
     confidence_threshold: float = field(default_factory=lambda: float(os.getenv("CONFIDENCE_THRESHOLD", "0.65")))
     top_k_similar_incidents: int = field(default_factory=lambda: int(os.getenv("TOP_K_SIMILAR_INCIDENTS", "5")))

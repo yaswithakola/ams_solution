@@ -54,6 +54,22 @@ INCIDENT_FIELDS = (
     "priority,state,close_notes"
 )
 
+SERVICE_REQUEST_FIELDS = (
+    "sys_id,number,sys_class_name,short_description,description,"
+    "cmdb_ci,cmdb_ci.name,assignment_group,assignment_group.name,"
+    "requested_for,requested_for.email,opened_by,opened_by.email,"
+    "priority,state,stage,active"
+)
+
+CATALOG_TASK_FIELDS = (
+    "sys_id,number,sys_class_name,short_description,description,"
+    "request_item,request_item.number,request_item.short_description,request_item.description,"
+    "request_item.requested_for,request_item.requested_for.email,"
+    "request_item.opened_by,request_item.opened_by.email,"
+    "cmdb_ci,cmdb_ci.name,assignment_group,assignment_group.name,"
+    "priority,state,active"
+)
+
 
 class ServiceNowAuthError(Exception):
     """Raised on 401/403 - credentials or role/permission problem. Never retried."""
@@ -82,10 +98,11 @@ def _normalize_instance_url(raw_url: str) -> str:
 class ServiceNowClient:
     """
     Minimal wrapper for the operations the AMS solution needs:
-      - fetch new/unassigned incidents and service requests
+      - fetch new/unassigned incidents and service catalog tasks
+      - enrich catalog tasks with parent RITM context
       - fetch a single ticket
       - update the assignment group (L2 routing) on an incident
-      - add a work note
+      - add a work note or catalog task comment
       - resolve an assignment-group name to its sys_id
       - bulk-fetch historical/closed incidents for vector DB ingestion
 
@@ -187,17 +204,62 @@ class ServiceNowClient:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
            retry=retry_if_exception_type((ServiceNowConnectionError,)), reraise=True)
-    def get_new_service_requests(self, limit: int = 50) -> List[Ticket]:
+    def get_new_service_requests(self, extra_query: Optional[str] = None, limit: int = 50) -> List[Ticket]:
         """Fetch open service catalog requested items (sc_req_item)."""
+        query = self.settings.service_request_query_filter
+        if extra_query:
+            query = f"{query}^{extra_query}"
         params = {
-            "sysparm_query": "active=true",
-            "sysparm_fields": "sys_id,number,sys_class_name,short_description,description,cmdb_ci,assignment_group",
+            "sysparm_query": query,
+            "sysparm_fields": SERVICE_REQUEST_FIELDS,
             "sysparm_limit": limit,
             "sysparm_display_value": "false",
         }
         resp = self._request("GET", "/api/now/table/sc_req_item", params=params)
         results = resp.json().get("result", [])
         return [self._to_ticket(r, table="sc_req_item") for r in results]
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
+           retry=retry_if_exception_type((ServiceNowConnectionError,)), reraise=True)
+    def get_new_catalog_tasks(self, extra_query: Optional[str] = None, limit: int = 50) -> List[Ticket]:
+        """Fetch open catalog tasks and enrich each task with its parent RITM details."""
+        query = self.settings.service_request_task_query_filter
+        if extra_query:
+            query = f"{query}^{extra_query}"
+        params = {
+            "sysparm_query": query,
+            "sysparm_fields": CATALOG_TASK_FIELDS,
+            "sysparm_limit": limit,
+            "sysparm_display_value": "false",
+        }
+        resp = self._request("GET", "/api/now/table/sc_task", params=params)
+        results = resp.json().get("result", [])
+
+        tasks = []
+        for raw in results:
+            task = self._to_ticket(raw, table="sc_task")
+            parent = self._fetch_parent_request_item(task.request_item_sys_id)
+            if parent:
+                task = self._merge_parent_request_item(task, parent)
+            tasks.append(task)
+        return tasks
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
+           retry=retry_if_exception_type((ServiceNowConnectionError,)), reraise=True)
+    def get_catalog_tasks_for_request_item(self, request_item_sys_id: str, limit: int = 50) -> List[Ticket]:
+        """Fetch catalog tasks that belong to a specific RITM."""
+        if not request_item_sys_id:
+            return []
+
+        params = {
+            "sysparm_query": f"request_item={request_item_sys_id}",
+            "sysparm_fields": CATALOG_TASK_FIELDS,
+            "sysparm_limit": limit,
+            "sysparm_display_value": "false",
+        }
+        resp = self._request("GET", "/api/now/table/sc_task", params=params)
+        results = resp.json().get("result", [])
+        return [self._to_ticket(raw, table="sc_task") for raw in results]
 
     def get_ticket(self, sys_id: str, table: str = "incident") -> Optional[Ticket]:
         try:
@@ -266,6 +328,22 @@ class ServiceNowClient:
         self._request("PATCH", f"/api/now/table/{table}/{sys_id}", json={"work_notes": note})
         return True
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
+           retry=retry_if_exception_type((ServiceNowConnectionError,)), reraise=True)
+    def add_comment(self, sys_id: str, comment: str, table: str = "sc_task") -> bool:
+        self._request("PATCH", f"/api/now/table/{table}/{sys_id}", json={"comments": comment})
+        return True
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
+           retry=retry_if_exception_type((ServiceNowConnectionError,)), reraise=True)
+    def close_catalog_task(self, sys_id: str, close_state: str = "3") -> bool:
+        self._request(
+            "PATCH",
+            f"/api/now/table/sc_task/{sys_id}",
+            json={"state": close_state},
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Connectivity self-test
     # ------------------------------------------------------------------
@@ -289,6 +367,26 @@ class ServiceNowClient:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _fetch_parent_request_item(self, sys_id: Optional[str]) -> Optional[Ticket]:
+        if not sys_id:
+            return None
+        try:
+            return self.get_ticket(sys_id, table="sc_req_item")
+        except Exception:
+            logger.exception("Failed to fetch parent RITM %s for catalog task", sys_id)
+            return None
+
+    @staticmethod
+    def _merge_parent_request_item(task: Ticket, parent: Ticket) -> Ticket:
+        return task.model_copy(update={
+            "request_item_sys_id": parent.sys_id or task.request_item_sys_id,
+            "request_item_number": parent.number or task.request_item_number,
+            "request_item_short_description": parent.short_description or task.request_item_short_description,
+            "request_item_description": parent.description or task.request_item_description,
+            "requested_for_email": parent.requested_for_email or task.requested_for_email,
+            "opened_by_email": parent.opened_by_email or task.opened_by_email,
+        })
+
     @staticmethod
     def _to_ticket(raw: Dict, table: str) -> Ticket:
         def flat(field):
@@ -298,10 +396,26 @@ class ServiceNowClient:
                 return v.get("value")
             return v
 
-        cmdb_ci_name = raw.get("cmdb_ci.name") or (raw.get("cmdb_ci", {}) or {}).get("display_value")
-        assignment_group_name = raw.get("assignment_group.name") or (
-            raw.get("assignment_group", {}) or {}
-        ).get("display_value")
+        def ref_attr(field, attribute):
+            v = raw.get(field)
+            return v.get(attribute) if isinstance(v, dict) else None
+
+        cmdb_ci_name = raw.get("cmdb_ci.name") or ref_attr("cmdb_ci", "display_value")
+        assignment_group_name = raw.get("assignment_group.name") or ref_attr("assignment_group", "display_value")
+        request_item_sys_id = flat("request_item")
+        request_item_number = raw.get("request_item.number")
+        request_item_short_description = raw.get("request_item.short_description")
+        request_item_description = raw.get("request_item.description")
+        requested_for_email = (
+            raw.get("requested_for.email")
+            or raw.get("request_item.requested_for.email")
+            or ref_attr("requested_for", "email")
+        )
+        opened_by_email = (
+            raw.get("opened_by.email")
+            or raw.get("request_item.opened_by.email")
+            or ref_attr("opened_by", "email")
+        )
 
         return Ticket(
             sys_id=raw.get("sys_id", ""),
@@ -313,6 +427,12 @@ class ServiceNowClient:
             cmdb_ci=flat("cmdb_ci"),
             cmdb_ci_name=cmdb_ci_name,
             assignment_group=assignment_group_name,
+            request_item_sys_id=request_item_sys_id,
+            request_item_number=request_item_number,
+            request_item_short_description=request_item_short_description,
+            request_item_description=request_item_description,
+            requested_for_email=requested_for_email,
+            opened_by_email=opened_by_email,
             priority=raw.get("priority"),
             state=raw.get("state"),
             raw=raw,

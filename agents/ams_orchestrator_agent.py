@@ -1,7 +1,7 @@
 """
 AMS Orchestrator AI Agent
 =========================
-Input : ServiceNow incidents + ServiceNow service (catalog) tickets.
+Input : ServiceNow incidents + ServiceNow request items.
 Process:
     1. Classify each fetched record as an incident or a service request.
        Incidents are handed off to the Incident Router AI Agent.
@@ -19,6 +19,10 @@ Process:
        for approval via the same approve-link email pattern used for
        low-confidence routing. Every outcome is written to the audit
        trail and, once confirmed, fed back into the vector DB.
+    6. Requested items (sc_req_item / RITM) are routed through the
+       Service Request Router. If matching catalog tasks (sc_task) exist
+       for the same RITM, the result comment is mirrored there and the
+       task is closed after successful fulfillment.
 
 Configure: connects to ServiceNow via common.servicenow_client, using
 credentials from config.ServiceNowSettings (placeholders - replace with
@@ -46,15 +50,17 @@ from config import Settings
 from agents.incident_router_agent import IncidentRouterAgent
 from agents.job_remediation_agent import JobRemediationAgent
 from agents.report_generation_agent import ReportGenerationAgent
+from agents.restart_agent import RestartAgent
 from agents.service_request_router_agent import (
-    REQUEST_GLUE_JOB_CONTROL,
     REQUEST_REPORT_GENERATION,
+    REQUEST_RESTART,
     ServiceRequestRouterAgent,
 )
 
 if TYPE_CHECKING:
     from common.llm_base import AgentLLMClient
     from common.report_service import ReportService
+    from common.restart_service import RestartService
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,27 @@ SCHEDULED JOB / ETL JOB failure (e.g. a cron job, Control-M job, Autosys job, sc
 batch process, or similar automated job erroring out, failing, or not completing). \
 Return strict JSON with keys: is_job_failure (true/false), confidence (0.0-1.0), rationale, \
 and job_name (best-guess job name if mentioned, else null)."""
+
+
+def _humanize_report_name(report_name: Optional[str]) -> str:
+    if not report_name:
+        return "report"
+    return report_name.replace("_", " ")
+
+
+def _format_restart_success_message(action: Optional[str], job_name: Optional[str], trigger_name: Optional[str]) -> str:
+    action = (action or "").lower()
+    if action == "enable":
+        if trigger_name:
+            return f"Enabled the Glue trigger {trigger_name} for job {job_name}."
+        return f"Enabled the Glue job {job_name}."
+    if action == "disable":
+        if trigger_name:
+            return f"Disabled the Glue trigger {trigger_name} for job {job_name}."
+        return f"Disabled the Glue job {job_name}."
+    if action == "restart":
+        return f"Restarted the Glue job {job_name}."
+    return f"Completed the requested action for {job_name}."
 
 
 class AMSOrchestratorAgent:
@@ -87,6 +114,8 @@ class AMSOrchestratorAgent:
         service_request_router_agent: Optional[ServiceRequestRouterAgent] = None,
         report_generation_agent: Optional[ReportGenerationAgent] = None,
         report_service: Optional["ReportService"] = None,
+        restart_agent: Optional[RestartAgent] = None,
+        restart_service: Optional["RestartService"] = None,
         llm_model_settings=None,
     ):
         self.settings = settings
@@ -103,7 +132,10 @@ class AMSOrchestratorAgent:
         self.service_request_router = service_request_router_agent
         self.report_generation = report_generation_agent
         self.report_service = report_service
+        self.restart_agent = restart_agent
+        self.restart_service = restart_service
         self.model = (llm_model_settings or settings.anthropic).model_orchestrator
+        self._processed_service_requests = set()
 
     # ------------------------------------------------------------------
     # Ticket-type classification
@@ -116,7 +148,7 @@ class AMSOrchestratorAgent:
         """
         if ticket.table == "incident" or ticket.sys_class_name == "incident":
             return "incident"
-        if ticket.table in ("sc_req_item", "sc_request") or (ticket.sys_class_name or "").startswith("sc_"):
+        if ticket.table in ("sc_task", "sc_req_item", "sc_request") or (ticket.sys_class_name or "").startswith("sc_"):
             return "service_request"
 
         user_prompt = (
@@ -247,7 +279,9 @@ class AMSOrchestratorAgent:
         )
 
     # ------------------------------------------------------------------
-    # Service-request pipeline
+    # Service-request pipeline. The RITM is the primary request record.
+    # Matching catalog tasks are optional follower records that receive
+    # the same human-readable comment, and are closed after success.
     # ------------------------------------------------------------------
     def handle_service_request(self, ticket: Ticket) -> None:
         if self.service_request_router is None:
@@ -266,18 +300,13 @@ class AMSOrchestratorAgent:
             self.handle_report_generation_request(ticket)
             return
 
-        if route.request_type == REQUEST_GLUE_JOB_CONTROL:
-            self._add_service_request_note(
-                ticket,
-                "[AMS AI] Service Request Router identified this as a Glue job control request. "
-                "Glue enable/disable automation is not wired yet, so the ticket still needs manual handling.",
-            )
+        if route.request_type == REQUEST_RESTART:
+            self.handle_restart_request(ticket)
             return
 
-        self._add_service_request_note(
+        self._add_service_request_comment(
             ticket,
-            "[AMS AI] Service Request Router could not match this request to a supported automation path. "
-            f"Reason: {route.rationale}",
+            f"Could not match this service request to a supported automation path. {route.rationale}",
         )
 
     def handle_report_generation_request(self, ticket: Ticket) -> None:
@@ -287,47 +316,111 @@ class AMSOrchestratorAgent:
 
         details = self.report_generation.parse(ticket)
         if details.insufficient_information:
-            self._add_service_request_note(
+            self._add_service_request_comment(
                 ticket,
-                "[AMS AI] Report Generation AI Agent could not extract enough information to run a report. "
-                f"Reason: {details.rationale or 'Missing report name or date range.'}",
+                "Could not process the report request because some details were missing. "
+                f"{details.rationale or 'Please provide the report name and date range.'}",
             )
             return
 
         if self.report_service is None:
-            filter_text = ", ".join(f"{key}={value}" for key, value in details.filters.items()) or "none"
-            self._add_service_request_note(
+            self._add_service_request_comment(
                 ticket,
-                "[AMS AI] Report Generation AI Agent parsed this request successfully. "
-                f"report={details.report_name}, frequency={details.frequency}, "
-                f"date_range={details.date_range}, filters={filter_text}, "
-                f"recipient={details.recipient or 'not specified'}. "
-                "Report execution is not configured in this environment.",
+                f"Understood the request for the {_humanize_report_name(details.report_name)} report, "
+                "but report execution is not configured in this environment yet.",
             )
             return
 
         result = self.report_service.run(details)
         if result.status == "FAILED":
-            self._add_service_request_note(
+            self._add_service_request_comment(
                 ticket,
-                "[AMS AI] Report generation failed before email delivery. "
-                f"Report: {result.report_name}. Reason: {result.message}",
+                f"Could not generate the {_humanize_report_name(result.report_name)} report. {result.message}",
             )
             return
 
-        self._add_service_request_note(
+        if result.email_sent and result.recipient:
+            note = f"Generated the {_humanize_report_name(result.report_name)} report and emailed it to {result.recipient}."
+        elif result.output_path:
+            note = (
+                f"Generated the {_humanize_report_name(result.report_name)} report. "
+                "The file is available in the local output folder."
+            )
+        else:
+            note = f"Generated the {_humanize_report_name(result.report_name)} report."
+        self._add_service_request_comment(ticket, note, close_related_tasks=True)
+
+        logger.info("RITM %s processed; any related catalog tasks were updated and closed.", ticket.number)
+
+    def handle_restart_request(self, ticket: Ticket) -> None:
+        if self.restart_agent is None:
+            self._add_service_request_comment(ticket, "Restart automation is not configured in this environment.")
+            return
+
+        details = self.restart_agent.parse(ticket)
+        if details.insufficient_information:
+            self._add_service_request_comment(
+                ticket,
+                "Could not process the restart request because some details were missing. "
+                f"{details.rationale or 'Please provide the action and job name.'}",
+            )
+            return
+
+        if self.restart_service is None:
+            self._add_service_request_comment(
+                ticket,
+                f"Understood the request for {details.job_name}, but restart execution is not configured in this environment yet.",
+            )
+            return
+
+        result = self.restart_service.run(details)
+        if result.status == "FAILED":
+            self._add_service_request_comment(
+                ticket,
+                f"Could not complete the request for {result.job_name}. {result.message}",
+            )
+            return
+
+        self._add_service_request_comment(
             ticket,
-            "[AMS AI] Report request completed through the approved report catalog. "
-            f"report={result.report_name}, records={result.record_count}, "
-            f"recipient={result.recipient or 'not specified'}, output={result.output_path or 'not generated'}. "
-            f"{result.message}",
+            _format_restart_success_message(result.action, result.job_name, result.trigger_name),
+            close_related_tasks=True,
         )
 
-    def _add_service_request_note(self, ticket: Ticket, note: str) -> None:
+        logger.info("RITM %s processed by Restart Agent; any related catalog tasks were updated and closed.", ticket.number)
+
+    def _add_service_request_comment(self, ticket: Ticket, comment: str, close_related_tasks: bool = False) -> None:
         try:
-            self.servicenow.add_work_note(ticket.sys_id, note, table=ticket.table)
+            self.servicenow.add_comment(ticket.sys_id, comment, table=ticket.table)
         except Exception:
-            logger.exception("Failed to add service-request work note for %s", ticket.number)
+            logger.exception("Failed to add service-request comment for %s", ticket.number)
+
+        if ticket.table != "sc_req_item":
+            return
+
+        try:
+            related_tasks = self.servicenow.get_catalog_tasks_for_request_item(ticket.sys_id)
+        except Exception:
+            logger.exception("Failed to fetch related catalog tasks for %s", ticket.number)
+            return
+
+        for task in related_tasks:
+            try:
+                self.servicenow.add_comment(task.sys_id, comment, table=task.table)
+            except Exception:
+                logger.exception("Failed to mirror service-request comment to %s", task.number)
+                continue
+
+            if not close_related_tasks:
+                continue
+
+            try:
+                self.servicenow.close_catalog_task(
+                    task.sys_id,
+                    close_state=self.settings.servicenow.service_request_task_closed_state,
+                )
+            except Exception:
+                logger.exception("Failed to close related catalog task %s", task.number)
 
     # ------------------------------------------------------------------
     # Per-ticket pipeline
@@ -337,7 +430,12 @@ class AMSOrchestratorAgent:
         logger.info("Ticket %s classified as %s", ticket.number, ticket_type)
 
         if ticket_type != "incident":
+            service_request_key = ticket.sys_id or ticket.number
+            if service_request_key in self._processed_service_requests:
+                logger.info("Skipping service request %s because it was already processed in this run.", ticket.number)
+                return
             self.handle_service_request(ticket)
+            self._processed_service_requests.add(service_request_key)
             return
 
         # 1. Route the incident to get the suggested L2 assignment group
@@ -454,7 +552,7 @@ class AMSOrchestratorAgent:
     def run_once(self) -> None:
         incidents = self.servicenow.get_new_incidents()
         service_requests = self.servicenow.get_new_service_requests()
-        logger.info("Fetched %d incidents and %d service requests", len(incidents), len(service_requests))
+        logger.info("Fetched %d incidents and %d request items", len(incidents), len(service_requests))
 
         for ticket in incidents + service_requests:
             try:

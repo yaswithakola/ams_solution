@@ -30,6 +30,7 @@ from agents.ams_orchestrator_agent import AMSOrchestratorAgent
 from agents.incident_router_agent import IncidentRouterAgent
 from agents.job_remediation_agent import JobRemediationAgent
 from agents.report_generation_agent import ReportGenerationAgent
+from agents.restart_agent import RestartAgent
 from agents.service_request_router_agent import ServiceRequestRouterAgent
 from common.approval_store import ApprovalStore
 from common.audit_store import AuditStore
@@ -41,6 +42,8 @@ from common.report_catalog import ReportCatalog
 from common.report_database import PostgresReportClient
 from common.report_excel import ExcelReportGenerator
 from common.report_service import ReportService
+from common.restart_catalog import RestartJobCatalog
+from common.restart_service import RestartService
 from common.s3_client import S3Client
 from common.servicenow_client import ServiceNowClient
 from common.sop_store import SOPStore
@@ -119,6 +122,10 @@ def build_orchestrator() -> AMSOrchestratorAgent:
         llm_client=llm_client,
         anthropic_settings=llm_model_settings,
     )
+    restart_agent = RestartAgent(
+        llm_client=llm_client,
+        anthropic_settings=llm_model_settings,
+    )
     report_catalog = ReportCatalog(
         catalog_path=settings.reports.catalog_path,
         sql_dir=settings.reports.sql_dir,
@@ -128,6 +135,9 @@ def build_orchestrator() -> AMSOrchestratorAgent:
         database_client=PostgresReportClient(settings.reports.database_url),
         excel_generator=ExcelReportGenerator(settings.reports.output_dir),
         ses_settings=settings.ses,
+    )
+    restart_service = RestartService(
+        catalog=RestartJobCatalog(settings.restart.catalog_path),
     )
 
     orchestrator = AMSOrchestratorAgent(
@@ -145,6 +155,8 @@ def build_orchestrator() -> AMSOrchestratorAgent:
         service_request_router_agent=service_request_router_agent,
         report_generation_agent=report_generation_agent,
         report_service=report_service,
+        restart_agent=restart_agent,
+        restart_service=restart_service,
         llm_model_settings=llm_model_settings,
     )
     return orchestrator

@@ -16,12 +16,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 REQUEST_REPORT_GENERATION = "report_generation"
-REQUEST_GLUE_JOB_CONTROL = "glue_job_control"
+REQUEST_RESTART = "restart"
 REQUEST_UNSUPPORTED = "unsupported"
 
 KNOWN_REQUEST_TYPES = {
     REQUEST_REPORT_GENERATION,
-    REQUEST_GLUE_JOB_CONTROL,
+    REQUEST_RESTART,
     REQUEST_UNSUPPORTED,
 }
 
@@ -30,14 +30,14 @@ SYSTEM_PROMPT = """You are the Service Request Router AI Agent for an Applicatio
 
 - report_generation: the user is asking for an operational/business report to be generated, scheduled, \
   or emailed.
-- glue_job_control: the user is asking to enable, disable, start, stop, or change the run state of an \
-  AWS Glue job.
+- restart: the user is asking to restart, rerun, retry, enable, disable, start, stop, or change the run \
+  state of an approved job. This includes AWS Glue job requests.
 - unsupported: the request is not one of the above.
 
 Do not execute anything. Do not write SQL. Do not invent missing details.
 
 Return strict JSON with exactly these keys: request_type, confidence, rationale, insufficient_information.
-request_type must be one of: report_generation, glue_job_control, unsupported.
+request_type must be one of: report_generation, restart, unsupported.
 confidence must be a float between 0.0 and 1.0.
 Set insufficient_information=true when the ticket text is too vague to choose a route safely."""
 
@@ -49,9 +49,12 @@ class ServiceRequestRouterAgent:
 
     def route(self, ticket: Ticket) -> ServiceRequestRoute:
         user_prompt = f"""Service request to classify:
-Number: {ticket.number}
-Short description: {ticket.short_description}
-Description: {ticket.description}
+Catalog task number: {ticket.number}
+Catalog task short description: {ticket.short_description}
+Catalog task description: {ticket.description}
+Parent RITM number: {ticket.request_item_number or "unknown"}
+Parent RITM short description: {ticket.request_item_short_description or "unknown"}
+Parent RITM description: {ticket.request_item_description or "unknown"}
 Configuration Item: {ticket.cmdb_ci_name or "unknown"}
 
 Choose the route for this service request."""
@@ -88,7 +91,14 @@ Choose the route for this service request."""
     def _normalize_request_type(value) -> str:
         if not isinstance(value, str):
             return REQUEST_UNSUPPORTED
-        return value.strip().lower().replace("-", "_").replace(" ", "_")
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "glue_job_control": REQUEST_RESTART,
+            "job_control": REQUEST_RESTART,
+            "restart_agent": REQUEST_RESTART,
+            "job_restart": REQUEST_RESTART,
+        }
+        return aliases.get(normalized, normalized)
 
     @staticmethod
     def _confidence(value) -> float:

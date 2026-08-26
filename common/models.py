@@ -8,17 +8,23 @@ from pydantic import BaseModel, Field
 
 class Ticket(BaseModel):
     """Normalized representation of a ServiceNow record (incident or
-    service catalog request/item)."""
+    service catalog task/request item)."""
 
     sys_id: str
     number: str
-    table: str  # "incident" or "sc_req_item" / "sc_request"
+    table: str  # "incident", "sc_task", "sc_req_item", or "sc_request"
     sys_class_name: Optional[str] = None
     short_description: str = ""
     description: str = ""
     cmdb_ci: Optional[str] = None
     cmdb_ci_name: Optional[str] = None
     assignment_group: Optional[str] = None
+    request_item_sys_id: Optional[str] = None
+    request_item_number: Optional[str] = None
+    request_item_short_description: Optional[str] = None
+    request_item_description: Optional[str] = None
+    requested_for_email: Optional[str] = None
+    opened_by_email: Optional[str] = None
     priority: Optional[str] = None
     state: Optional[str] = None
     raw: dict = Field(default_factory=dict)  # original ServiceNow payload
@@ -124,6 +130,40 @@ class ReportExecutionResult(BaseModel):
     message: str = ""
     output_path: Optional[str] = None
     email_sent: bool = False
+
+
+class RestartRequestDetails(BaseModel):
+    """Structured restart/enable/disable request extracted from a catalog task."""
+
+    ticket_number: str
+    service: str = "glue"
+    action: Optional[str] = None
+    job_name: Optional[str] = None
+    confidence: float = 0.0
+    rationale: str = ""
+    insufficient_information: bool = False
+
+
+class RestartJobDefinition(BaseModel):
+    """One approved job entry that the Restart Agent is allowed to operate on."""
+
+    job_name: str
+    service: str = "glue"
+    trigger_name: Optional[str] = None
+    allowed_actions: List[str] = Field(default_factory=list)
+    aliases: List[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class RestartExecutionResult(BaseModel):
+    ticket_number: str
+    status: str
+    service: str = "glue"
+    action: Optional[str] = None
+    job_name: Optional[str] = None
+    trigger_name: Optional[str] = None
+    message: str = ""
+    executed: bool = False
 
 
 class SimilarJobFailure(BaseModel):

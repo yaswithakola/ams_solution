@@ -1,0 +1,71 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SendReportEmailsWithSes",
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RunApprovedRestartAgentGlueActions",
+      "Effect": "Allow",
+      "Action": [
+        "glue:StartJobRun",
+        "glue:StartTrigger",
+        "glue:StopTrigger"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RunApprovedIncidentRemediationActions",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:StopTask",
+        "ecs:ListContainerInstances",
+        "ecs:DescribeContainerInstances",
+        "rds:RebootDBInstance",
+        "rds:DescribeDBInstances",
+        "ec2:RebootInstances",
+        "ec2:StopInstances",
+        "ec2:StartInstances",
+        "ec2:DescribeInstances",
+        "lambda:GetFunctionConfiguration",
+        "lambda:UpdateFunctionConfiguration",
+        "states:StartExecution",
+        "states:DescribeExecution",
+        "glue:GetJobRun",
+        "glue:GetJob",
+        "glue:GetJobRuns"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadOperationalEvidence",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents",
+        "s3:ListBucket",
+        "s3:GetObject"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MoveApprovedS3RemediationFiles",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CopyObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -42,6 +42,7 @@ Rules:
 - Do not calculate actual dates. Use date_range labels only: today, yesterday, previous_week, \
   previous_month, or custom. Only return start_date/end_date when the user gives explicit custom dates.
 - Put business filters such as state=Texas in the filters object.
+- If the request does not name an email recipient, use the ServiceNow requester email when it is available.
 - Use output_format="excel" unless the user explicitly asks for another format. If they do, still \
   return excel and explain the limitation in rationale.
 - If the report name cannot be matched to the approved report list, set insufficient_information=true.
@@ -57,9 +58,14 @@ class ReportGenerationAgent:
 
     def parse(self, ticket: Ticket) -> ReportRequestDetails:
         user_prompt = f"""Service request:
-Number: {ticket.number}
-Short description: {ticket.short_description}
-Description: {ticket.description}
+Catalog task number: {ticket.number}
+Catalog task short description: {ticket.short_description}
+Catalog task description: {ticket.description}
+Parent RITM number: {ticket.request_item_number or "unknown"}
+Parent RITM short description: {ticket.request_item_short_description or "unknown"}
+Parent RITM description: {ticket.request_item_description or "unknown"}
+Requested for email: {ticket.requested_for_email or "unknown"}
+Opened by email: {ticket.opened_by_email or "unknown"}
 
 Extract the report request fields."""
 
@@ -73,6 +79,8 @@ Extract the report request fields."""
         filters = self._clean_filters(result.get("filters"))
         output_format = self._normalize_choice(result.get("output_format"), {"excel"}, default="excel")
         recipient = result.get("recipient") if isinstance(result.get("recipient"), str) else None
+        if not recipient:
+            recipient = ticket.requested_for_email or ticket.opened_by_email
 
         insufficient = bool(result.get("insufficient_information", False))
         if report_name not in KNOWN_REPORTS or date_range is None:
