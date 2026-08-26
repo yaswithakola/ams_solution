@@ -6,10 +6,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agents.restart_agent import RestartAgent
+from agents.restart_agent import RestartAgent, RestartJobCatalog, RestartService
 from common.models import RestartRequestDetails, Ticket
-from common.restart_catalog import RestartJobCatalog
-from common.restart_service import RestartService
 
 
 class FakeAnthropicSettings:

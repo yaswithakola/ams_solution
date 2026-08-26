@@ -59,8 +59,8 @@ from agents.service_request_router_agent import (
 
 if TYPE_CHECKING:
     from common.llm_base import AgentLLMClient
-    from common.report_service import ReportService
-    from common.restart_service import RestartService
+    from agents.report_generation_agent import ReportService
+    from agents.restart_agent import RestartService
 
 logger = logging.getLogger(__name__)
 

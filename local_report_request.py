@@ -4,13 +4,15 @@ Local entry point for testing report service requests without ServiceNow.
 import argparse
 import logging
 
-from agents.report_generation_agent import ReportGenerationAgent
+from agents.report_generation_agent import (
+    ExcelReportGenerator,
+    PostgresReportClient,
+    ReportCatalog,
+    ReportGenerationAgent,
+    ReportService,
+)
 from common.llm_factory import build_llm_client
 from common.models import Ticket
-from common.report_catalog import ReportCatalog
-from common.report_database import PostgresReportClient
-from common.report_excel import ExcelReportGenerator
-from common.report_service import ReportService
 from config import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

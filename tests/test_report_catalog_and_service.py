@@ -7,12 +7,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
-from common.report_excel import ExcelReportGenerator
+from agents.report_generation_agent import (
+    ExcelReportGenerator,
+    ReportCatalog,
+    ReportDateResolver,
+    ReportService,
+    build_report_parameters,
+    validate_select_only_sql,
+)
 from common.models import ReportRequestDetails
-from common.report_catalog import ReportCatalog
-from common.report_date_resolver import ReportDateResolver
-from common.report_service import ReportService
-from common.report_sql import build_report_parameters, validate_select_only_sql
 
 
 class FakeReportDatabase:
